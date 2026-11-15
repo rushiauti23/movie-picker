@@ -2,6 +2,7 @@ import * as S from './store.js';
 import { db, MOODS, ENERGY, title } from './store.js';
 import * as T from './tmdb.js';
 import * as Share from './share.js';
+import * as Cloud from './cloud.js';
 
 /* ---------- small DOM helpers (all text goes through textContent, never innerHTML) ---------- */
 const $ = s => document.querySelector(s);
@@ -18,6 +19,8 @@ function h(tag, props, ...kids) {
   return el;
 }
 const view = $('#view'), dlg = $('#dlg');
+// Views pass null for parts they leave out; drop those instead of printing them.
+{ const add = view.append.bind(view); view.append = (...nodes) => add(...nodes.flat().filter(n => n != null && n !== false)); }
 let toastTimer = 0;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3200); }
 function openDialog(titleText, ...body) { $('#dlg-title').textContent = titleText; const b = $('#dlg-body'); b.textContent = ''; b.append(...body.flat().filter(Boolean)); if (!dlg.open) dlg.showModal(); }
@@ -101,9 +104,70 @@ function askName(then) {
   openDialog('What should rooms call you?', h('label', { for: 'name-input' }, 'Your name, as the other person will see it', input), h('div', { class: 'row' }, btn));
 }
 
+
+const TIMES = [[0, 'Any length'], [30, '30 min'], [45, '45 min'], [60, '1 hour'], [90, '1h 30'], [120, '2 hours'], [150, '2h 30']];
+
+/* ---------- picks: the owner's published list, the first thing a visitor sees ---------- */
+const pf = { time: 0, moods: new Set(), energy: '', type: '', seen: '', q: '' };
+const picks = { data: null, error: '', loading: false, at: 0 };
+function loadPicks(force) {
+  if (picks.loading || (!force && picks.data && Date.now() - picks.at < 60000)) return;
+  picks.loading = true;
+  Cloud.getShelf().then(d => { picks.data = d || { name: '', updatedAt: 0, items: [] }; picks.error = ''; }).catch(e => { picks.error = e.message; }).finally(() => { picks.loading = false; picks.at = Date.now(); if ((location.hash || '#picks').startsWith('#picks') || location.hash === '') render(); });
+}
+function viewPicks() {
+  loadPicks(false);
+  const d = picks.data, owner = Cloud.isOwner(), who = (d && d.name) || 'My';
+  const heading = d && d.name ? d.name + '\'s picks' : 'Picks';
+  if (!d) { view.append(h('div', { class: 'head' }, h('div', null, h('h1', { text: heading }), h('p', { class: 'sub', text: picks.error || 'Loading the list…' }))), picks.error ? h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', text: 'Try again', onclick: () => { picks.error = ''; loadPicks(true); render(); } })) : null); return; }
+  const all = d.items;
+  let list = all.filter(x => (!pf.time || (x.runtime && x.runtime <= pf.time)) && (!pf.moods.size || x.moods.some(m => pf.moods.has(m))) && (!pf.energy || x.energy === pf.energy) && (!pf.type || x.type === pf.type) && (!pf.seen || (pf.seen === 'seen' ? x.seen : !x.seen)) && (!pf.q || x.title.toLowerCase().includes(pf.q.toLowerCase())));
+  list.sort((a, b) => (b.rating - a.rating) || (b.addedAt - a.addedAt));
+  const set = (k, v) => { pf[k] = v; render(); };
+  const q = h('input', { id: 'pk-q', type: 'search', placeholder: 'Find a title', value: pf.q, 'aria-label': 'Find a title in the picks', enterkeyhint: 'search' });
+  q.addEventListener('input', () => { pf.q = q.value; render(); const n = $('#pk-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); });
+  const active = pf.time || pf.moods.size || pf.energy || pf.type || pf.seen || pf.q;
+  const usedMoods = MOODS.filter(m => all.some(x => x.moods.includes(m)));
+  view.append(h('div', { class: 'head' }, h('div', null, h('h1', { text: heading }), h('p', { class: 'sub', text: all.length ? list.length + ' of ' + all.length + ' titles' + (d.updatedAt ? ' · updated ' + new Date(d.updatedAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '') : 'Nothing has been published yet.' })), owner ? h('a', { class: 'btn', href: '#add', text: 'Add a title' }) : null),
+    owner ? h('p', { class: 'banner', text: 'This is what your friends see when they open the site. It updates by itself a moment after you change your list or diary.' }) : null);
+  if (!all.length) { view.append(h('div', { class: 'empty' }, h('b', { text: 'No picks yet' }), owner ? 'Add titles to your list and they appear here for everyone.' : 'Check back soon.')); return; }
+  view.append(h('section', { class: 'panel filters', 'aria-label': 'Filters' },
+    h('div', { class: 'fgroup' }, h('b', { text: 'I have' }), chipGroup(TIMES.map(([id, label]) => ({ id, label })), id => pf.time === id, id => set('time', id))),
+    usedMoods.length ? h('div', { class: 'fgroup' }, h('b', { text: 'Mood' }), chipGroup(usedMoods.map(m => ({ id: m, label: m })), id => pf.moods.has(id), id => { pf.moods.has(id) ? pf.moods.delete(id) : pf.moods.add(id); render(); })) : null,
+    h('div', { class: 'fgroup' }, h('b', { text: 'Energy' }), chipGroup(ENERGY.map(e => ({ id: e.id, label: e.label })), id => pf.energy === id, id => set('energy', pf.energy === id ? '' : id))),
+    h('div', { class: 'fgroup' }, h('b', { text: 'Show' }), chipGroup([{ id: '', label: 'Everything' }, { id: 'seen', label: 'Watched and rated' }, { id: 'todo', label: 'Still to watch' }, { id: 'movie', label: 'Films' }, { id: 'tv', label: 'Series' }], id => (id === 'movie' || id === 'tv') ? pf.type === id : (pf.seen === id && (id !== '' || !pf.type)), id => { if (id === 'movie' || id === 'tv') pf.type = pf.type === id ? '' : id; else { pf.seen = id; if (id === '') pf.type = ''; } render(); })),
+    h('div', { class: 'row' }, h('div', { class: 'grow' }, q), active ? h('button', { class: 'btn', type: 'button', text: 'Clear filters', onclick: () => { Object.assign(pf, { time: 0, energy: '', type: '', seen: '', q: '' }); pf.moods.clear(); render(); } }) : null)));
+  if (!list.length) { view.append(h('div', { class: 'empty' }, h('b', { text: 'Nothing fits those filters' }), 'Loosen a filter to see more.')); return; }
+  view.append(h('div', { class: 'grid' }, list.map(x => {
+    const en = ENERGY.find(e => e.id === x.energy), mineListed = !!S.onList(x.id), mineSeen = S.diaryFor(x.id).length;
+    const addMine = () => { S.putTitle({ id: x.id, type: x.type, tmdbId: x.tmdbId, title: x.title, year: x.year, poster: x.poster, runtime: x.runtime, genres: [], overview: x.overview, score: x.score }, true); S.addToWatchlist(x.id, { moods: x.moods, energy: x.energy, note: '', by: d.name || '' }); toast('Added to your list.'); render(); };
+    return h('article', { class: 'card' }, posterEl(x),
+      h('div', { class: 'info' }, h('h3', { text: x.title }), h('div', { class: 'meta', text: metaLine(x) }),
+        h('div', { class: 'row', style: 'gap:6px' }, x.rating ? h('span', { class: 'tag gold', text: (d.name || 'Rated') + (d.name ? ': ' : ' ') + stars(x.rating) }) : (x.seen ? h('span', { class: 'tag', text: 'Watched' }) : h('span', { class: 'tag', text: 'On ' + (d.name ? d.name + '\'s' : 'the') + ' list' })), en ? h('span', { class: 'tag e-' + en.id, text: en.label + ' energy' }) : null, x.moods.map(m => h('span', { class: 'tag', text: m }))),
+        (x.seenNote || x.note) ? h('div', { class: 'note', text: '“' + (x.seenNote || x.note) + '”' }) : null,
+        owner ? null : h('div', { class: 'actions' }, h('button', { class: 'btn small' + (mineListed || mineSeen ? '' : ' primary'), type: 'button', disabled: mineListed || !!mineSeen, text: mineSeen ? 'You have watched it' : (mineListed ? 'On your list' : 'Add to my list'), onclick: addMine }))));
+  })));
+}
+
+/* ---------- owner sync: publish after changes, pull on another device ---------- */
+let pubTimer = 0, pubState = '';
+function schedulePublish() { if (!Cloud.isOwner()) return; clearTimeout(pubTimer); pubTimer = setTimeout(doPublish, 1500); }
+async function doPublish() {
+  if (!Cloud.isOwner()) return false;
+  try { const shelf = await Cloud.publish(); picks.data = { name: shelf.name, updatedAt: shelf.updatedAt, items: shelf.items.map(x => Object.assign({ tmdbId: x.id[0] === 'x' ? null : Number(x.id.slice(1)) }, x)) }; picks.at = Date.now(); pubState = 'Published ' + new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) + '.'; const el = $('#pub-state'); if (el) el.textContent = pubState; return true; }
+  catch (e) { pubState = 'Could not publish: ' + e.message; const el = $('#pub-state'); if (el) el.textContent = pubState; toast('Your list could not be published. It will retry on the next change.'); return false; }
+}
+S.onChange(schedulePublish);
+function adoptVault(v) { const keep = { apiKey: db.settings.apiKey, ownerKey: db.settings.ownerKey }; S.replaceAll(v); Object.assign(db.settings, keep); db.sync = { at: Number(v.updatedAt) || Date.now(), dirty: false }; S.saveQuiet(); }
+// On an owner's device at start-up: take the online copy if it is newer and nothing here is waiting to be published.
+async function ownerPull() {
+  if (!Cloud.isOwner()) return;
+  try { const v = await Cloud.getVault(); if (v && Number(v.updatedAt) > db.sync.at) { if (!db.sync.dirty) { adoptVault(v); render(); toast('Loaded your latest list from your other device.'); } else doPublish(); } else if (db.sync.dirty) doPublish(); }
+  catch (e) { /* offline or storage not ready: the device keeps working from its own copy */ }
+}
+
 /* ---------- watchlist ---------- */
 const wf = { time: 0, moods: new Set(), energy: '', type: '', q: '', sort: 'recent', picked: null };
-const TIMES = [[0, 'Any length'], [30, '30 min'], [45, '45 min'], [60, '1 hour'], [90, '1h 30'], [120, '2 hours'], [150, '2h 30']];
 function viewWatchlist() {
   const all = db.watchlist.map(w => ({ w, t: title(w.id) }));
   let list = all.filter(({ w, t }) =>
@@ -124,7 +188,7 @@ function viewWatchlist() {
   pick.addEventListener('click', () => { wf.picked = list[Math.floor(Math.random() * list.length)].w.id; render(); const el = document.querySelector('.card.picked'); if (el) el.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); });
   const active = wf.time || wf.moods.size || wf.energy || wf.type || wf.q;
   view.append(
-    h('div', { class: 'head' }, h('div', null, h('h1', { text: 'What fits tonight?' }), h('p', { class: 'sub', text: all.length ? list.length + ' of ' + all.length + ' on your watchlist' + (active ? ' match' : '') : 'Your watchlist is empty.' })), h('div', { class: 'row' }, pick, h('a', { class: 'btn', href: '#add', text: 'Add a title' }))),
+    h('div', { class: 'head' }, h('div', null, h('h1', { text: 'My list: what fits tonight?' }), h('p', { class: 'sub', text: all.length ? list.length + ' of ' + all.length + ' on your watchlist' + (active ? ' match' : '') : 'Your watchlist is empty.' })), h('div', { class: 'row' }, pick, h('a', { class: 'btn', href: '#add', text: 'Add a title' }))),
     all.length ? h('section', { class: 'panel filters', 'aria-label': 'Filters' },
       h('div', { class: 'fgroup' }, h('b', { text: 'I have' }), chipGroup(TIMES.map(([id, label]) => ({ id, label })), id => wf.time === id, id => set('time', id))),
       h('div', { class: 'fgroup' }, h('b', { text: 'Mood' }), chipGroup(MOODS.map(m => ({ id: m, label: m })), id => wf.moods.has(id), id => { wf.moods.has(id) ? wf.moods.delete(id) : wf.moods.add(id); wf.picked = null; render(); })),
@@ -167,7 +231,7 @@ function drawResults() {
 function runSearch() {
   clearTimeout(add.timer); const q = add.q.trim(); add.error = '';
   if (q.length < 2) { add.results = null; add.loading = false; drawResults(); return; }
-  if (!T.hasKey()) { add.error = 'Searching needs a TMDB key. Add one in Settings, or add the title by hand below.'; drawResults(); return; }
+  if (!T.hasKey()) { add.error = 'Search is not set up on this site yet. Add the title by hand below.'; drawResults(); return; }
   add.loading = true; drawResults(); const seq = ++add.seq;
   add.timer = setTimeout(async () => {
     try { const r = await T.search(q); if (seq !== add.seq) return; add.results = r; add.error = ''; }
@@ -183,7 +247,7 @@ function viewAdd() {
   const manual = h('button', { class: 'btn', type: 'button', text: 'Add by hand' });
   manual.addEventListener('click', () => { const name = mt.value.trim(); if (!name) { mt.focus(); return; } const t = S.putTitle({ id: 'x' + S.uid(), type: mk.value, tmdbId: null, title: name.slice(0, 140), year: Number(my.value) || null, poster: '', runtime: Number(mr.value) > 0 ? Number(mr.value) : null, genres: [], overview: '', score: null }); S.save(); tagDialog(t, () => { location.hash = '#watchlist'; }); });
   view.append(h('div', { class: 'head' }, h('div', null, h('h1', { text: 'Add a title' }), h('p', { class: 'sub', text: 'Search TMDB, then tag what you add with a mood and an energy level so it can be found later.' }))),
-    T.hasKey() ? null : h('div', { class: 'banner stack' }, h('b', { text: 'One-time setup: a free TMDB key' }), h('span', { text: 'Search and posters come from The Movie Database. Paste your key in Settings and this page starts working. Until then you can add titles by hand.' }), h('div', { class: 'row' }, h('a', { class: 'btn primary small', href: '#settings', text: 'Open Settings' }))),
+    T.hasKey() ? null : h('div', { class: 'banner stack' }, h('b', { text: 'Search is not set up on this site yet' }), h('span', { text: 'Search and posters come from The Movie Database. The site owner connects it once in config.js and it works for everyone. Until then you can paste a key in Settings or add titles by hand.' }), h('div', { class: 'row' }, h('a', { class: 'btn primary small', href: '#settings', text: 'Open Settings' }))),
     input, h('div', { id: 'add-results', class: 'stack' }),
     h('details', { class: 'panel' }, h('summary', { text: 'Not on TMDB? Add it by hand' }), h('div', { class: 'stack', style: 'margin-top:12px' }, h('label', { for: 'man-title' }, 'Title', mt), h('div', { class: 'row' }, h('label', { for: 'man-kind', class: 'grow' }, 'Kind', mk), h('label', { for: 'man-year', class: 'grow' }, 'Year', my), h('label', { for: 'man-run', class: 'grow' }, 'Runtime', mr)), h('div', { class: 'row' }, manual))));
   drawResults();
@@ -359,8 +423,37 @@ function viewSwipe(rid, member) {
 window.addEventListener('keydown', e => { if (swipeKeys && location.hash.startsWith('#swipe/') && !/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) swipeKeys(e); });
 
 /* ---------- settings ---------- */
+function ownerSection() {
+  if (!Cloud.available()) return null;
+  if (Cloud.isOwner()) {
+    return h('section', { class: 'panel stack' }, h('h2', { text: 'Owner mode is on' }), h('p', { class: 'sub', text: 'This device publishes your list. Friends see your list, tags, notes and ratings on the Picks page. Your ledger and rooms stay private.' }),
+      h('p', { class: 'fine', id: 'pub-state', role: 'status', text: pubState || (db.sync.at ? 'Last published ' + new Date(db.sync.at).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) + '.' : 'Not published yet.') }),
+      h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', text: 'Publish now', onclick: async () => { if (await doPublish()) toast('Published.'); } }), h('button', { class: 'btn', type: 'button', text: 'Turn off on this device', onclick: () => { db.settings.ownerKey = ''; S.saveQuiet(); render(); } })));
+  }
+  const pw = h('input', { id: 'own-key', type: 'password', autocomplete: 'current-password', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', placeholder: 'Owner passphrase' });
+  const msg = h('p', { class: 'fine', role: 'status' });
+  const btn = h('button', { class: 'btn', type: 'button', text: 'Unlock owner mode' });
+  const unlock = async () => {
+    const key = pw.value; if (!key) { pw.focus(); return; } btn.disabled = true; msg.textContent = 'Checking…';
+    try {
+      await Cloud.checkOwner(key); const v = await Cloud.getVault(key); const local = db.watchlist.length + db.diary.length;
+      const finish = () => { closeDialog(); toast('Owner mode is on.'); render(); };
+      if (v && local) {
+        btn.disabled = false; msg.textContent = '';
+        openDialog('Which list should win?', h('p', { text: 'There is already a list saved online, and this device has its own. Choose which one to keep. The other is replaced.' }),
+          h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', text: 'Use the list saved online', onclick: () => { db.settings.ownerKey = key; adoptVault(v); finish(); } }), h('button', { class: 'btn', type: 'button', text: 'Publish this device\'s list', onclick: async () => { db.settings.ownerKey = key; S.saveQuiet(); await doPublish(); finish(); } })));
+        return;
+      }
+      db.settings.ownerKey = key; S.saveQuiet();
+      if (v) adoptVault(v); else await doPublish();
+      finish();
+    } catch (e) { msg.textContent = e.message; btn.disabled = false; }
+  };
+  btn.addEventListener('click', unlock); pw.addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
+  return h('details', { class: 'panel' }, h('summary', { text: 'Site owner' }), h('div', { class: 'stack', style: 'margin-top:12px' }, h('p', { class: 'sub', text: 'If this is your site, enter your owner passphrase. This device can then change the list everyone sees.' }), h('label', { for: 'own-key' }, 'Owner passphrase', pw), h('div', { class: 'row' }, btn), msg));
+}
 function viewSettings() {
-  const built = !!(window.REELROOM_CONFIG && window.REELROOM_CONFIG.tmdbKey);
+  const built = T.builtIn();
   const name = h('input', { id: 'set-name', type: 'text', maxlength: '30', value: db.settings.name, autocomplete: 'given-name', autocapitalize: 'words', placeholder: 'Your first name' });
   name.addEventListener('change', () => { db.settings.name = name.value.trim().slice(0, 30); S.save(); toast('Name saved.'); });
   const key = h('input', { id: 'set-key', type: 'password', value: db.settings.apiKey, autocomplete: 'off', autocapitalize: 'none', autocorrect: 'off', spellcheck: 'false', placeholder: built ? 'A key is already built into this site' : 'Paste your TMDB API key or read access token' });
@@ -368,27 +461,32 @@ function viewSettings() {
   const saveKey = h('button', { class: 'btn primary', type: 'button', text: 'Save and test key' });
   saveKey.addEventListener('click', async () => {
     const v = key.value.trim(); saveKey.disabled = true; status.textContent = 'Checking with TMDB…';
-    try { if (v || built) await T.testKey(v || window.REELROOM_CONFIG.tmdbKey); db.settings.apiKey = v; S.save(); add.trending = null; add.error = ''; status.textContent = v ? 'TMDB accepted the key. It is saved in this browser only.' : (built ? 'Using the key built into this site.' : 'Key removed.'); }
+    try { if (v) await T.testKey(v); db.settings.apiKey = v; S.save(); add.trending = null; add.error = ''; status.textContent = v ? 'TMDB accepted the key. It is saved in this browser only.' : (built ? 'Using the key built into this site.' : 'Key removed.'); }
     catch (e) { status.textContent = e.message + ' The key was not saved.'; }
     saveKey.disabled = false;
   });
   const file = h('input', { id: 'set-file', type: 'file', accept: 'application/json,.json', 'aria-label': 'Backup file to restore' });
-  file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; try { const d = JSON.parse(await f.text()); if (!d || !Array.isArray(d.watchlist) || !Array.isArray(d.diary)) throw new Error('bad'); const keepKey = db.settings.apiKey; S.replaceAll(d); if (!db.settings.apiKey) { db.settings.apiKey = keepKey; S.save(); } toast('Backup restored.'); render(); } catch (e) { toast('That file is not a Reel Room backup.'); } file.value = ''; });
-  const exportBtn = h('button', { class: 'btn', type: 'button', text: 'Download a backup', onclick: () => { const copy = JSON.parse(JSON.stringify(db)); copy.settings.apiKey = ''; const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(copy, null, 1)], { type: 'application/json' })), download: 'reel-room-backup-' + S.today() + '.json' }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); } });
+  file.addEventListener('change', async () => { const f = file.files[0]; if (!f) return; try { const d = JSON.parse(await f.text()); if (!d || !Array.isArray(d.watchlist) || !Array.isArray(d.diary)) throw new Error('bad'); const keep = { apiKey: db.settings.apiKey, ownerKey: db.settings.ownerKey }; S.replaceAll(d); Object.assign(db.settings, keep); S.save(); toast('Backup restored.'); render(); } catch (e) { toast('That file is not a Reel Room backup.'); } file.value = ''; });
+  const exportBtn = h('button', { class: 'btn', type: 'button', text: 'Download a backup', onclick: () => { const copy = JSON.parse(JSON.stringify(db)); copy.settings.apiKey = ''; copy.settings.ownerKey = ''; delete copy.sync; const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(copy, null, 1)], { type: 'application/json' })), download: 'reel-room-backup-' + S.today() + '.json' }); document.body.append(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); } });
   const erase = h('button', { class: 'btn danger', type: 'button', text: 'Erase everything', onclick: () => { openDialog('Erase everything?', h('p', { text: 'This removes your watchlist, diary, ledger, rooms and saved key from this browser. It cannot be undone. Download a backup first if you might want it back.' }), h('div', { class: 'row' }, h('button', { class: 'btn danger', type: 'button', text: 'Yes, erase it all', onclick: () => { S.eraseAll(); closeDialog(); toast('Everything erased.'); render(); } }), h('button', { class: 'btn', type: 'button', text: 'Keep my data', onclick: closeDialog }))); } });
   const logo = h('img', { class: 'tmdb-logo', src: 'assets/tmdb-logo.svg', alt: 'TMDB logo' }); logo.addEventListener('error', () => logo.remove());
   view.append(h('div', { class: 'head' }, h('div', null, h('h1', { text: 'Settings' }))),
     S.storageOk ? null : h('p', { class: 'banner', text: 'This browser is blocking storage, so nothing you add will be kept after you close the tab. Private browsing mode often causes this.' }),
     h('section', { class: 'panel stack' }, h('h2', { text: 'You' }), h('label', { for: 'set-name' }, 'Your name in rooms', name)),
-    h('section', { class: 'panel stack' }, h('h2', { text: 'TMDB key' }), h('p', { class: 'sub' }, 'Search, posters and runtimes come from The Movie Database. Create a free account, request an API key under Settings → API, and paste it here. ', h('a', { href: 'https://www.themoviedb.org/settings/api', target: '_blank', rel: 'noopener', text: 'Get a key at themoviedb.org' })), h('label', { for: 'set-key' }, 'API key or read access token', key), h('div', { class: 'row' }, saveKey), status),
+    // When the site ships with a key in config.js, visitors never see a key field.
+    built ? null : h('section', { class: 'panel stack' }, h('h2', { text: 'TMDB key' }), h('p', { class: 'sub' }, 'Search, posters and runtimes come from The Movie Database. This copy of the site has no key yet. The owner can connect the search proxy in config.js so nobody has to enter a key; until then you can paste your own here. ', h('a', { href: 'https://www.themoviedb.org/settings/api', target: '_blank', rel: 'noopener', text: 'Get a key at themoviedb.org' })), h('label', { for: 'set-key' }, 'API key or read access token', key), h('div', { class: 'row' }, saveKey), status),
+    ownerSection(),
     h('section', { class: 'panel stack' }, h('h2', { text: 'Your data' }), h('p', { class: 'sub', text: 'Everything is stored in this browser on this device, not on a server. Clearing site data deletes it, so download a backup now and then. A backup also moves your data to another device.' }), h('div', { class: 'row' }, exportBtn, erase), h('label', { for: 'set-file' }, 'Restore from a backup file (replaces what is here)', file)),
     h('section', { class: 'panel stack' }, h('h2', { text: 'About' }), h('div', { class: 'row' }, logo, h('p', { class: 'grow', text: 'This product uses the TMDB API but is not endorsed or certified by TMDB.' })), h('p', { class: 'fine' }, 'Film and series data and images are provided by ', h('a', { href: 'https://www.themoviedb.org/', target: '_blank', rel: 'noopener', text: 'The Movie Database (TMDB)' }), '. Reel Room is a personal, non-commercial project.')));
 }
 
 /* ---------- router ---------- */
-const ROUTES = { watchlist: viewWatchlist, add: viewAdd, diary: viewDiary, ledger: viewLedger, rooms: viewRooms, settings: viewSettings };
+const ROUTES = { picks: viewPicks, watchlist: viewWatchlist, add: viewAdd, diary: viewDiary, ledger: viewLedger, rooms: viewRooms, settings: viewSettings };
 function render() {
-  const hash = location.hash || '#watchlist';
+  // Visitors land on the owner's picks. The owner lands on their own list.
+  const home = (Cloud.available() && !Cloud.isOwner()) ? '#picks' : '#watchlist';
+  const hash = (location.hash && location.hash !== '#') ? location.hash : home;
+  const picksTab = document.querySelector('.tabs a[data-tab="picks"]'); if (picksTab) picksTab.hidden = !Cloud.available();
   if (hash.startsWith('#join=')) {
     try { const { room, created } = Share.apply(Share.unpack(hash)); history.replaceState(null, '', '#room/' + room.rid); toast(created ? 'Room added: ' + room.name : 'Room updated with new votes.'); }
     catch (e) { history.replaceState(null, '', '#rooms'); toast(e.message); }
@@ -399,10 +497,10 @@ function render() {
   let tab = route;
   if (route === 'room') { viewRoom(a); tab = 'rooms'; }
   else if (route === 'swipe') { let m = ''; try { m = decodeURIComponent(b || ''); } catch (e) { } viewSwipe(a, m.slice(0, 30)); tab = 'rooms'; }
-  else (ROUTES[route] || viewWatchlist)();
-  if (!ROUTES[tab]) tab = 'watchlist';
+  else { if (!ROUTES[route] || (route === 'picks' && !Cloud.available())) tab = home.slice(1); ROUTES[tab](); }
   document.querySelectorAll('.tabs a').forEach(el => { if (el.dataset.tab === tab) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); });
-  document.title = ({ watchlist: 'Watchlist', add: 'Add', diary: 'Diary', ledger: 'Ledger', rooms: 'Rooms', settings: 'Settings' })[tab] + ' · Reel Room';
+  document.title = ({ picks: 'Picks', watchlist: 'My list', add: 'Add', diary: 'Diary', ledger: 'Ledger', rooms: 'Rooms', settings: 'Settings' })[tab] + ' · Reel Room';
 }
 window.addEventListener('hashchange', () => { closeDialog(); render(); window.scrollTo(0, 0); });
 render();
+ownerPull();

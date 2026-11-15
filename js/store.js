@@ -8,7 +8,7 @@ export const ENERGY = [
   { id: 'high', label: 'High', hint: 'needs full attention' }
 ];
 
-const blank = () => ({ v: 1, settings: { apiKey: '', name: '' }, titles: {}, watchlist: [], diary: [], ledger: [], rooms: [] });
+const blank = () => ({ v: 1, settings: { apiKey: '', name: '', ownerKey: '' }, sync: { at: 0, dirty: false }, titles: {}, watchlist: [], diary: [], ledger: [], rooms: [] });
 
 function normalise(d) {
   const b = blank();
@@ -16,6 +16,7 @@ function normalise(d) {
   return {
     v: 1,
     settings: Object.assign(b.settings, d.settings || {}),
+    sync: Object.assign(b.sync, d.sync || {}),
     titles: d.titles && typeof d.titles === 'object' ? d.titles : {},
     watchlist: Array.isArray(d.watchlist) ? d.watchlist : [],
     diary: Array.isArray(d.diary) ? d.diary : [],
@@ -30,8 +31,15 @@ function load() {
 
 export let db = load();
 export let storageOk = true;
-export function save() {
+const listeners = [];
+export const onChange = fn => listeners.push(fn);
+// saveQuiet writes to storage; save also marks the data as changed so an owner's device republishes it.
+export function saveQuiet() {
   try { localStorage.setItem(KEY, JSON.stringify(db)); storageOk = true; } catch (e) { storageOk = false; }
+  return storageOk;
+}
+export function save() {
+  db.sync.dirty = true; saveQuiet(); listeners.forEach(fn => { try { fn(); } catch (e) { /* a listener must not break saving */ } });
   return storageOk;
 }
 export function replaceAll(d) { db = normalise(d); return save(); }
@@ -66,6 +74,8 @@ export const diaryFor = id => db.diary.filter(e => e.id === id);
 export function logWatch(id, { date, rating, note = '', keepOnList = false }) {
   const entry = { eid: uid(), id, date: date || today(), rating: rating ? Number(rating) : 0, note: clip(note, 500), rewatch: diaryFor(id).length > 0 };
   db.diary.push(entry);
+  // Keep the mood and energy tags with the title, so they survive once it leaves the watchlist.
+  const w = onList(id); if (w && db.titles[id]) db.titles[id].tags = { moods: w.moods, energy: w.energy, note: w.note };
   if (!keepOnList) db.watchlist = db.watchlist.filter(w => w.id !== id);
   save(); return entry;
 }

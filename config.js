@@ -1,13 +1,12 @@
-// Optional. Put a TMDB key here if you want everyone who opens your deployed site
-// (for example the person you share a room with) to be able to search without
-// entering a key of their own.
+// How this site reaches its Cloudflare Worker (see the worker/ folder).
 //
-// Accepts either the short "API Key" or the long "API Read Access Token"
-// from https://www.themoviedb.org/settings/api
+// proxyUrl: the Worker's address. The Worker holds the TMDB key and stores your
+//   published list, so no key appears here or in the browser.
+//   Example: "https://reelroom-tmdb.your-subdomain.workers.dev"
 //
-// Anything in this file is public once you push it to a public repository.
-// Leave it empty to keep your key out of the repo; each person can then paste
-// a key in Settings, where it is stored only in their own browser.
+// tmdbKey: only for running without a Worker. Search works, but the key is public
+//   and there is no shared list: every visitor sees only their own.
 window.REELROOM_CONFIG = {
-  tmdbKey: "f1220364c8fbde8cca3f01bdd6d40e26"
+  proxyUrl: "",
+  tmdbKey: ""
 };

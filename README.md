@@ -2,11 +2,21 @@
 
 A personal watchlist that runs entirely in the browser. No server, no build step, no account.
 
-- **Watchlist** with mood and energy tags, and a "what fits tonight" filter by time, mood, energy and kind
+- **Picks**: the first thing visitors see. Your list, with your mood and energy tags, notes and ratings, filterable by time, mood and energy
+- **My list** for each visitor: their own watchlist, with one tap to add any of your picks
 - **Watch diary** with ratings, notes and rewatch tracking
-- **Recommendation ledger**: who recommended what to you (and what you recommended), with a hit rate per person
+- **Recommendation ledger**: who recommended what, with a hit rate per person
 - **Rooms**: a stack of titles that two or more people swipe on. Whatever nobody rejects is a match
-- **Backup**: download and restore everything as one JSON file
+
+## How the shared list works
+
+The site has one owner (you) and any number of visitors.
+
+- **You** unlock owner mode once per device: **Settings → Site owner**, enter your owner passphrase. From then on, anything you add, tag, log or rate is published automatically a moment later, and your other devices pick it up the next time they open the site.
+- **Visitors** open the site and land on your Picks. They cannot change your list. Anything they add goes to their own list in their own browser.
+- **Published**: your list, tags, notes, ratings and diary notes. **Never published**: your ledger (the names of people) and your rooms.
+
+If you edit on two devices at the same moment, the most recent change wins.
 
 ## Deploy on GitHub Pages
 
@@ -23,12 +33,23 @@ A personal watchlist that runs entirely in the browser. No server, no build step
 3. In the repository: **Settings → Pages → Build and deployment → Source: Deploy from a branch**, branch `main`, folder `/ (root)`. Save.
 4. After a minute the site is live at `https://<your-username>.github.io/reel-room/`.
 
-## Set up TMDB (one time)
+## Set up the Worker (one time)
+
+The site talks to a small Cloudflare Worker. It holds your TMDB key as a secret and stores your published list, so neither is in this repository.
 
 1. Create a free account at <https://www.themoviedb.org/> and request an API key under **Settings → API**. Choose the developer (non-commercial) option.
-2. Open your deployed site, go to **Settings**, paste the key and press **Save and test key**. Either the short "API Key" or the long "API Read Access Token" works.
+2. Deploy the Worker in `worker/`, with its storage, your TMDB key and an owner passphrase. Step-by-step instructions are in [`worker/README.md`](worker/README.md).
+3. Put the Worker's address in `config.js`:
+   ```js
+   window.REELROOM_CONFIG = {
+     proxyUrl: "https://reelroom-tmdb.your-subdomain.workers.dev",
+     tmdbKey: ""
+   };
+   ```
+4. Commit and push.
+5. Open the site, go to **Settings → Site owner**, and enter your passphrase. If you already added titles on that device, they are published at that moment.
 
-The key you paste is stored only in that browser. If you want search to work for anyone who opens your site without entering a key, put the key in `config.js` instead. Anything in `config.js` is public once pushed, so only do that if you are comfortable with the key being visible. You can regenerate a key in your TMDB settings at any time.
+GitHub Pages serves the `worker/` folder as plain text along with the rest of the site. That is harmless: it contains no key or passphrase.
 
 ### Attribution (required by TMDB)
 
@@ -49,9 +70,10 @@ GitHub Pages only serves files, so two phones cannot talk to each other directly
 
 The link carries the titles and every vote so far. Or use **Pass the phone** to swipe on one device.
 
-## Where your data lives
+## Where data lives
 
-Everything is saved in the browser's local storage on that device. It does not sync between devices, and clearing site data deletes it. Use **Settings → Download a backup** regularly, and **Restore** to move to another device.
+- **Your list (owner)**: in the Worker's storage, and in the browser of each device where owner mode is on.
+- **A visitor's own list, diary, ledger and rooms**: only in that visitor's browser. Clearing site data deletes it. **Settings → Download a backup** saves it to a file.
 
 ## Run it locally
 
@@ -72,7 +94,9 @@ python3 -m http.server 8000
 | `js/store.js` | Data model and local storage |
 | `js/tmdb.js` | TMDB API client |
 | `js/share.js` | Room links: encode, validate, merge |
-| `config.js` | Optional built-in TMDB key |
+| `js/cloud.js` | Reading and publishing the shared list |
+| `config.js` | The Worker's address |
+| `worker/` | The Cloudflare Worker: TMDB key and list storage |
 
 ## Not in this version
 

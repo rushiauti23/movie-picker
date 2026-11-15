@@ -1,0 +1,15 @@
+name = "reelroom-tmdb"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+# The sites allowed to use this proxy, comma-separated, no trailing slash.
+# Replace with your GitHub Pages address. Keep localhost while you develop.
+ALLOWED_ORIGINS = "https://YOUR-USERNAME.github.io,http://localhost:8000"
+
+# Storage for your published list. Create it once with:
+#   npx wrangler kv namespace create SHELF
+# then paste the id it prints here.
+[[kv_namespaces]]
+binding = "SHELF"
+id = "PASTE-THE-ID-HERE"

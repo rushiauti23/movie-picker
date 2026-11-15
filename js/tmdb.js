@@ -4,8 +4,13 @@ import { db } from './store.js';
 const API = 'https://api.themoviedb.org/3';
 const IMG = 'https://image.tmdb.org/t/p/';
 
-export const apiKey = () => (db.settings.apiKey || (window.REELROOM_CONFIG && window.REELROOM_CONFIG.tmdbKey) || '').trim();
-export const hasKey = () => apiKey().length > 0;
+const cfg = () => window.REELROOM_CONFIG || {};
+// Preferred setup: a proxy (see worker/) that holds the key, so the browser never sees one.
+export const proxyUrl = () => String(cfg().proxyUrl || '').trim().replace(/\/+$/, '');
+// Otherwise a key from config.js, or as a last resort one typed into Settings.
+export const apiKey = () => (cfg().tmdbKey || db.settings.apiKey || '').trim();
+export const builtIn = () => !!(proxyUrl() || String(cfg().tmdbKey || '').trim());
+export const hasKey = () => !!proxyUrl() || apiKey().length > 0;
 
 // Poster paths come from TMDB or from a shared link, so only well-formed ones are turned into URLs.
 export const poster = (path, size = 'w342') => (typeof path === 'string' && /^\/[A-Za-z0-9_.-]+\.(jpg|jpeg|png|webp)$/.test(path)) ? IMG + size + path : '';
@@ -13,16 +18,19 @@ export const poster = (path, size = 'w342') => (typeof path === 'string' && /^\/
 export class TmdbError extends Error {}
 
 async function get(path, params = {}, keyOverride) {
-  const key = (keyOverride != null ? keyOverride : apiKey()).trim();
-  if (!key) throw new TmdbError('No TMDB key yet. Add one in Settings.');
-  const url = new URL(API + path);
+  const proxy = keyOverride == null ? proxyUrl() : '';
+  const key = proxy ? '' : (keyOverride != null ? keyOverride : apiKey()).trim();
+  if (!proxy && !key) throw new TmdbError('Search is not set up on this site yet.');
+  const url = new URL((proxy || API) + path);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const opts = { headers: { accept: 'application/json' } };
-  // The long token (a JWT) goes in a header; the short key goes in the query string.
-  if (key.startsWith('eyJ')) opts.headers.Authorization = 'Bearer ' + key; else url.searchParams.set('api_key', key);
+  // With a proxy no key leaves the browser. Without one, the long token (a JWT) goes in a header and the short key in the query string.
+  if (key) { if (key.startsWith('eyJ')) opts.headers.Authorization = 'Bearer ' + key; else url.searchParams.set('api_key', key); }
   let res;
   try { res = await fetch(url, opts); } catch (e) { throw new TmdbError('Could not reach TMDB. Check your connection.'); }
-  if (res.status === 401) throw new TmdbError('TMDB did not accept that key. Check it in Settings.');
+  if (res.status === 403 && proxy) throw new TmdbError('The search proxy refused this site. Its ALLOWED_ORIGINS setting needs this site\'s address.');
+  if (res.status === 401) throw new TmdbError(proxy ? 'TMDB did not accept the key stored in the search proxy.' : 'TMDB did not accept that key.');
+  if (res.status >= 500 && proxy) throw new TmdbError('The search proxy is not set up correctly yet (' + res.status + ').');
   if (res.status === 429) throw new TmdbError('TMDB is asking us to slow down. Try again in a moment.');
   if (!res.ok) throw new TmdbError('TMDB returned an error (' + res.status + ').');
   return res.json();
