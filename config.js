@@ -9,5 +9,5 @@
 // Leave it empty to keep your key out of the repo; each person can then paste
 // a key in Settings, where it is stored only in their own browser.
 window.REELROOM_CONFIG = {
-  tmdbKey: ""
+  tmdbKey: "f1220364c8fbde8cca3f01bdd6d40e26"
 };
